@@ -26,4 +26,7 @@ class PaymentSystemImpl(
             account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
         }
     }
+
+    override fun canAccept(deadline: Long, queuedAhead: Int): Boolean =
+        paymentAccounts.any { it.isEnabled() && it.canMeetDeadline(deadline, queuedAhead) }
 }

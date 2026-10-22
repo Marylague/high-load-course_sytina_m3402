@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -14,10 +15,15 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 @Service
-class OrderPayer {
+class OrderPayer(meterRegistry: MeterRegistry) {
+
+    private val incomingCounter = meterRegistry.counter("payment.incoming")
+    private val rejectedSyncCounter = meterRegistry.counter("payment.rejected.sync")
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
+
+        private const val ADMISSION_MARGIN_MILLIS = 500L
     }
 
     @Autowired
@@ -27,8 +33,8 @@ class OrderPayer {
     private lateinit var paymentService: PaymentService
 
     private val paymentExecutor = ThreadPoolExecutor(
-        16,
-        16,
+        200,
+        200,
         0L,
         TimeUnit.MILLISECONDS,
         LinkedBlockingQueue(8_000),
@@ -36,7 +42,14 @@ class OrderPayer {
         CallerBlockingRejectedExecutionHandler()
     )
 
+    fun canAccept(deadline: Long): Boolean {
+        val accepted = paymentService.canAccept(deadline - ADMISSION_MARGIN_MILLIS, paymentExecutor.queue.size)
+        if (!accepted) rejectedSyncCounter.increment()
+        return accepted
+    }
+
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        incomingCounter.increment()
         val createdAt = System.currentTimeMillis()
         paymentExecutor.submit {
             val createdEvent = paymentESService.create {
