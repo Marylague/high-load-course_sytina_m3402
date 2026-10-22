@@ -22,6 +22,8 @@ class OrderPayer(meterRegistry: MeterRegistry) {
 
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
+
+        private const val ADMISSION_MARGIN_MILLIS = 500L
     }
 
     @Autowired
@@ -31,8 +33,8 @@ class OrderPayer(meterRegistry: MeterRegistry) {
     private lateinit var paymentService: PaymentService
 
     private val paymentExecutor = ThreadPoolExecutor(
-        16,
-        16,
+        200,
+        200,
         0L,
         TimeUnit.MILLISECONDS,
         LinkedBlockingQueue(8_000),
@@ -41,7 +43,7 @@ class OrderPayer(meterRegistry: MeterRegistry) {
     )
 
     fun canAccept(deadline: Long): Boolean {
-        val accepted = paymentService.canAccept(deadline, paymentExecutor.queue.size)
+        val accepted = paymentService.canAccept(deadline - ADMISSION_MARGIN_MILLIS, paymentExecutor.queue.size)
         if (!accepted) rejectedSyncCounter.increment()
         return accepted
     }

@@ -26,9 +26,10 @@ class PaymentExternalSystemAdapterImpl(
     meterRegistry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
 
+    private val rateWindow = Duration.ofSeconds(1)
     private val rateLimiter = SlidingWindowRateLimiter(
         rate = properties.rateLimitPerSec.toLong(),
-        window = Duration.ofMillis(1100)
+        window = rateWindow
     )
     private val ongoingWindow = OngoingWindow(
         maxWinSize = properties.parallelRequests
@@ -50,6 +51,7 @@ class PaymentExternalSystemAdapterImpl(
     private val client = OkHttpClient.Builder().build()
 
     private val pending = AtomicInteger()
+    private val waiting = AtomicInteger()
 
     private val outgoingCounter = meterRegistry.counter("payment.outgoing", "account", accountName)
     private val rejectedCounter = meterRegistry.counter("payment.rejected", "account", accountName)
@@ -58,13 +60,29 @@ class PaymentExternalSystemAdapterImpl(
 
     init {
         meterRegistry.gauge("payment.pending", listOf(io.micrometer.core.instrument.Tag.of("account", accountName)), pending) { it.get().toDouble() }
+        meterRegistry.gauge("payment.waiting", listOf(io.micrometer.core.instrument.Tag.of("account", accountName)), waiting) { it.get().toDouble() }
     }
 
 
     override fun canMeetDeadline(deadline: Long, queuedAhead: Int): Boolean {
-        val waves = (pending.get() + queuedAhead) / parallelRequests
-        val expectedFinish = now() + waves * requestAverageProcessingTime.toMillis() + requestAverageProcessingTime.toMillis()
+        val avgMillis = requestAverageProcessingTime.toMillis()
+        val rateWait = (waiting.get() + queuedAhead).toLong() * rateWindow.toMillis() / rateLimitPerSec
+        val slotWait = (pending.get() + queuedAhead).toLong() / parallelRequests * avgMillis
+        val expectedFinish = now() + maxOf(rateWait, slotWait) + avgMillis
         return expectedFinish <= deadline
+    }
+
+    private fun awaitRatePermit(deadline: Long): Boolean {
+        waiting.incrementAndGet()
+        try {
+            while (!rateLimiter.tick()) {
+                if (now() + requestAverageProcessingTime.toMillis() > deadline) return false
+                Thread.sleep(10)
+            }
+            return true
+        } finally {
+            waiting.decrementAndGet()
+        }
     }
 
     private fun reject(paymentId: UUID, reason: String, paymentStartedAt: Long) {
@@ -116,7 +134,14 @@ class PaymentExternalSystemAdapterImpl(
 
             var attempt = 0
             while (true) {
-                rateLimiter.tickBlocking()
+                if (!awaitRatePermit(deadline)) {
+                    rejectedCounter.increment()
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
+                    }
+                    break
+                }
+
                 outgoingCounter.increment()
 
                 val body = client.newCall(request).execute().use { response ->
