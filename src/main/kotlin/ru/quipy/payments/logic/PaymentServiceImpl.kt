@@ -29,4 +29,16 @@ class PaymentSystemImpl(
 
     override fun canAccept(deadline: Long, queuedAhead: Int): Boolean =
         paymentAccounts.any { it.isEnabled() && it.canMeetDeadline(deadline, queuedAhead) }
+
+    override fun tryAdmit(deadline: Long, queuedAhead: Int): Admission {
+        var retryAt = Long.MAX_VALUE
+        for (account in paymentAccounts) {
+            if (!account.isEnabled()) continue
+            val decision = account.tryAdmit(deadline, queuedAhead)
+            if (decision.accepted) return decision
+            if (decision.retryAfterTimestamp < retryAt) retryAt = decision.retryAfterTimestamp
+        }
+        if (retryAt == Long.MAX_VALUE) retryAt = System.currentTimeMillis() + 1_000
+        return Admission(accepted = false, retryAfterTimestamp = retryAt)
+    }
 }

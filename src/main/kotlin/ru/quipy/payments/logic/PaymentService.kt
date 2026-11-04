@@ -1,5 +1,6 @@
 package ru.quipy.payments.logic
 
+import java.sql.Timestamp
 import java.time.Duration
 import java.util.*
 
@@ -10,7 +11,14 @@ interface PaymentService {
     fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long)
 
     fun canAccept(deadline: Long, queuedAhead: Int): Boolean
+
+    fun tryAdmit(deadline: Long, queuedAhead: Int): Admission
 }
+
+data class Admission(
+    val accepted: Boolean,
+    val retryAfterTimestamp: Long = 0,
+)
 
 /**
  * Adapter for external payment system. Represents the account in the external system.
@@ -22,6 +30,8 @@ interface PaymentExternalSystemAdapter {
     fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long)
 
     fun canMeetDeadline(deadline: Long, queuedAhead: Int = 0): Boolean
+
+    fun tryAdmit(deadline: Long, queuedAhead: Int): Admission
 
     fun name(): String
 

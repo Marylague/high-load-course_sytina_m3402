@@ -48,6 +48,12 @@ class OrderPayer(meterRegistry: MeterRegistry) {
         return accepted
     }
 
+    fun tryAdmit(deadline: Long): Admission {
+        val decision = paymentService.tryAdmit(deadline - ADMISSION_MARGIN_MILLIS, paymentExecutor.queue.size)
+        if (!decision.accepted) rejectedSyncCounter.increment()
+        return decision
+    }
+
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         incomingCounter.increment()
         val createdAt = System.currentTimeMillis()

@@ -15,6 +15,8 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 
 // Advice: always treat time as a Duration
@@ -53,6 +55,10 @@ class PaymentExternalSystemAdapterImpl(
     private val pending = AtomicInteger()
     private val waiting = AtomicInteger()
 
+    private val admissionLock = ReentrantLock()
+    @Volatile
+    private var nextDepartureAtMillis: Double = 0.0
+
     private val outgoingCounter = meterRegistry.counter("payment.outgoing", "account", accountName)
     private val rejectedCounter = meterRegistry.counter("payment.rejected", "account", accountName)
     private val completedSuccess = meterRegistry.counter("payment.completed", "account", accountName, "result", "success")
@@ -63,6 +69,27 @@ class PaymentExternalSystemAdapterImpl(
         meterRegistry.gauge("payment.waiting", listOf(io.micrometer.core.instrument.Tag.of("account", accountName)), waiting) { it.get().toDouble() }
     }
 
+    override fun tryAdmit(deadline: Long, queuedAhead: Int): Admission {
+        val intervalMillis = rateWindow.toMillis().toDouble() / rateLimitPerSec
+        val processingMillis = requestAverageProcessingTime.toMillis().toDouble()
+        admissionLock.withLock {
+            val now = now().toDouble()
+            val rateWait = (waiting.get() + queuedAhead) * intervalMillis
+            val parallelWait = (pending.get() + queuedAhead).toDouble() / parallelRequests * processingMillis
+            val slot = maxOf(now + rateWait, now + parallelWait, nextDepartureAtMillis, now)
+
+            if (slot + processingMillis <= deadline) {
+                nextDepartureAtMillis = slot + intervalMillis
+                return Admission(accepted = true)
+            }
+            val timeLeft = deadline - now
+            val retryAt = (slot + processingMillis - timeLeft).coerceAtLeast(now + intervalMillis)
+            return Admission(
+                accepted = false,
+                retryAfterTimestamp = retryAt.toLong().coerceAtLeast(now().toLong() + 1),
+            )
+        }
+    }
 
     override fun canMeetDeadline(deadline: Long, queuedAhead: Int): Boolean {
         val avgMillis = requestAverageProcessingTime.toMillis()
@@ -132,16 +159,21 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            var attempt = 0
-            while (true) {
-                if (!awaitRatePermit(deadline)) {
-                    rejectedCounter.increment()
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
-                    }
-                    break
+//            var attempt = 0
+//            while (true) {
+//                if (!awaitRatePermit(deadline)) {
+//                    rejectedCounter.increment()
+//                    paymentESService.update(paymentId) {
+//                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
+//                    }
+//                    break
+//                }
+            if (!awaitRatePermit(deadline)) {
+                rejectedCounter.increment()
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
                 }
-
+            } else {
                 outgoingCounter.increment()
 
                 val body = client.newCall(request).execute().use { response ->
@@ -153,11 +185,11 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
 
-                val rateLimited = !body.result && body.message?.contains("Rate limit", ignoreCase = true) == true
-                if (rateLimited && ++attempt < 3 && now() + requestAverageProcessingTime.toMillis() < deadline) {
-                    Thread.sleep(100)
-                    continue
-                }
+//                val rateLimited = !body.result && body.message?.contains("Rate limit", ignoreCase = true) == true
+//                if (rateLimited && ++attempt < 3 && now() + requestAverageProcessingTime.toMillis() < deadline) {
+//                    Thread.sleep(100)
+//                    continue
+//                }
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
                 (if (body.result) completedSuccess else completedFail).increment()
@@ -167,7 +199,7 @@ class PaymentExternalSystemAdapterImpl(
                 paymentESService.update(paymentId) {
                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
-                break
+//                break
             }
         } catch (e: Exception) {
             when (e) {
