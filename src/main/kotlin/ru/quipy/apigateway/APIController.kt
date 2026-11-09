@@ -58,9 +58,6 @@ class APIController {
 
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
-//        if (!orderPayer.canAccept(deadline)) {
-//            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build()
-//        }
         val admission = orderPayer.tryAdmit(deadline)
         if (!admission.accepted) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)

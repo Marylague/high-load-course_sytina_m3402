@@ -159,15 +159,6 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-//            var attempt = 0
-//            while (true) {
-//                if (!awaitRatePermit(deadline)) {
-//                    rejectedCounter.increment()
-//                    paymentESService.update(paymentId) {
-//                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
-//                    }
-//                    break
-//                }
             if (!awaitRatePermit(deadline)) {
                 rejectedCounter.increment()
                 paymentESService.update(paymentId) {
@@ -185,12 +176,6 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
 
-//                val rateLimited = !body.result && body.message?.contains("Rate limit", ignoreCase = true) == true
-//                if (rateLimited && ++attempt < 3 && now() + requestAverageProcessingTime.toMillis() < deadline) {
-//                    Thread.sleep(100)
-//                    continue
-//                }
-
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
                 (if (body.result) completedSuccess else completedFail).increment()
 
@@ -199,7 +184,6 @@ class PaymentExternalSystemAdapterImpl(
                 paymentESService.update(paymentId) {
                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
-//                break
             }
         } catch (e: Exception) {
             when (e) {
