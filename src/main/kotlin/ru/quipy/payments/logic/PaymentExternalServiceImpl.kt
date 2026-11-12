@@ -43,6 +43,8 @@ class PaymentExternalSystemAdapterImpl(
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+
+        private const val MAX_ATTEMPTS = 3
     }
 
     private val serviceName = properties.serviceName
@@ -94,6 +96,15 @@ class PaymentExternalSystemAdapterImpl(
         return Admission(accepted = true)
     }
 
+    private fun isTransientMessage(message: String?): Boolean =
+        message != null && (message.contains("Rate limit", ignoreCase = true) ||
+                message.contains("Temporary error", ignoreCase = true))
+
+    private fun pauseBeforeRetry(header: String?): Long {
+        val value = header?.trim()?.toLongOrNull() ?: return tokenIntervalMillis
+        return if (value >= 1_000_000_000_000L) (value - now()).coerceAtLeast(0) else value * 1000
+    }
+
     override fun canMeetDeadline(deadline: Long, queuedAhead: Int): Boolean {
         return expectedFinishAt(queuedAhead) <= deadline
     }
@@ -102,7 +113,7 @@ class PaymentExternalSystemAdapterImpl(
         val avgMillis = requestAverageProcessingTime.toMillis()
         val rateWait = (waiting.get() + queuedAhead).toLong() * rateWindow.toMillis() / rateLimitPerSec
         val slotWait = (pending.get() + queuedAhead).toLong() / parallelRequests * avgMillis
-        return now() + maxOf(rateWait, slotWait) + avgMillis
+        return now + maxOf(rateWait, slotWait) + avgMillis
     }
 
     private fun awaitRatePermit(deadline: Long): Boolean {
@@ -165,50 +176,75 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-            if (!awaitRatePermit(deadline)) {
-                rejectedCounter.increment()
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded while waiting for rate limiter")
+            var attempt = 0
+            var success = false
+            var reason: String? = null
+            while (true) {
+                if (!awaitRatePermit(deadline)) {
+                    rejectedCounter.increment()
+                    success = false
+                    reason = "Deadline exceeded while waiting for rate limiter"
+                    break
                 }
-            } else {
                 outgoingCounter.increment()
 
-                val body = client.newCall(request).execute().use { response ->
-                    try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                var retriable: Boolean
+                var retryDelay = 0L
+                try {
+                    val call = client.newCall(request)
+                    call.timeout().timeout((deadline - now()).coerceAtLeast(1), TimeUnit.MILLISECONDS)
+                    call.execute().use { response ->
+                        val code = response.code
+                        val rawBody = response.body?.string()
+                        val parsed = try {
+                            mapper.readValue(rawBody, ExternalSysResponse::class.java)
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: $code, reason: $rawBody")
+                            ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                        }
+                        success = parsed.result
+                        reason = parsed.message
+                        val retriableByBody = !success && code == 200 && isTransientMessage(parsed.message)
+                        retriable = when {
+                            success -> false
+                            code == 429 || code >= 500 -> true
+                            code in 400..499 -> false
+                            else -> retriableByBody
+                        }
+                        retryDelay = when {
+                            code == 429 -> pauseBeforeRetry(response.header("Retry-After"))
+                            retriableByBody -> tokenIntervalMillis
+                            else -> 0L
+                        }
                     }
+                } catch (e: java.io.IOException) {
+                    logger.error("[$accountName] Payment IO error for txId: $transactionId, payment: $paymentId, attempt: $attempt", e)
+                    success = false
+                    reason = if (e is SocketTimeoutException) "Request timeout." else e.message
+                    retriable = true
                 }
 
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-                (if (body.result) completedSuccess else completedFail).increment()
+                logger.warn("[$accountName] Payment attempt $attempt for txId: $transactionId, payment: $paymentId, succeeded: $success, message: $reason")
 
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                if (retriable && !success && attempt < MAX_ATTEMPTS - 1 &&
+                    now() + retryDelay + requestAverageProcessingTime.toMillis() <= deadline
+                ) {
+                    if (retryDelay > 0) Thread.sleep(retryDelay)
+                    attempt++
+                    continue
                 }
+                break
+            }
+
+            (if (success) completedSuccess else completedFail).increment()
+            paymentESService.update(paymentId) {
+                it.logProcessing(success, now(), transactionId, reason = reason)
             }
         } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    completedFail.increment()
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
-                }
-
-                else -> {
-                    completedFail.increment()
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
-                }
+            completedFail.increment()
+            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = e.message)
             }
         }
         finally {
