@@ -9,6 +9,7 @@ import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.TokenBucketRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -16,7 +17,7 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
+import java.util.concurrent.TimeUnit
 
 
 // Advice: always treat time as a Duration
@@ -55,9 +56,17 @@ class PaymentExternalSystemAdapterImpl(
     private val pending = AtomicInteger()
     private val waiting = AtomicInteger()
 
-    private val admissionLock = ReentrantLock()
-    @Volatile
-    private var nextDepartureAtMillis: Double = 0.0
+    // на входе ведро токенов, за секунду наливаем rateLimitPerSec токенов, сам бакет в 2 раза больше
+    // из-за него копим неиспользованные разрешения и отдаем на всплеске, неблокирующий берем
+    private val tokenIntervalMillis = (rateWindow.toMillis() / rateLimitPerSec.coerceAtLeast(1)).coerceAtLeast(1)
+    private val tokenBucket = TokenBucketRateLimiter(
+        rate = rateLimitPerSec,
+        bucketMaxCapacity = rateLimitPerSec * 2, // берем *2 для запаса на одну пустую секунду
+        // получается, что то, что не потратили останется, а след долив поднимет до двух норм и
+        // это все мы отдадим на всплеск
+        window = 1,
+        timeUnit = TimeUnit.SECONDS,
+    )
 
     private val outgoingCounter = meterRegistry.counter("payment.outgoing", "account", accountName)
     private val rejectedCounter = meterRegistry.counter("payment.rejected", "account", accountName)
@@ -69,34 +78,31 @@ class PaymentExternalSystemAdapterImpl(
         meterRegistry.gauge("payment.waiting", listOf(io.micrometer.core.instrument.Tag.of("account", accountName)), waiting) { it.get().toDouble() }
     }
 
+    // если не успеем до дд - 429 и retry-after
+    // если успели, но нет токена - 429 и повтор через интервал одного токена
+    // в ином случае пускаем, все ок
     override fun tryAdmit(deadline: Long, queuedAhead: Int): Admission {
-        val intervalMillis = rateWindow.toMillis().toDouble() / rateLimitPerSec
-        val processingMillis = requestAverageProcessingTime.toMillis().toDouble()
-        admissionLock.withLock {
-            val now = now().toDouble()
-            val rateWait = (waiting.get() + queuedAhead) * intervalMillis
-            val parallelWait = (pending.get() + queuedAhead).toDouble() / parallelRequests * processingMillis
-            val slot = maxOf(now + rateWait, now + parallelWait, nextDepartureAtMillis, now)
-
-            if (slot + processingMillis <= deadline) {
-                nextDepartureAtMillis = slot + intervalMillis
-                return Admission(accepted = true)
-            }
-            val timeLeft = deadline - now
-            val retryAt = (slot + processingMillis - timeLeft).coerceAtLeast(now + intervalMillis)
-            return Admission(
-                accepted = false,
-                retryAfterTimestamp = retryAt.toLong().coerceAtLeast(now().toLong() + 1),
-            )
+        val now = now()
+        val finishAt = expectedFinishAt(queuedAhead, now)
+        if (finishAt > deadline) {
+            val retryAt = (finishAt - (deadline - now)).coerceAtLeast(now + tokenIntervalMillis)
+            return Admission(accepted = false, retryAfterTimestamp = retryAt)
         }
+        if (!tokenBucket.tick()) {
+            return Admission(accepted = false, retryAfterTimestamp = now + tokenIntervalMillis)
+        }
+        return Admission(accepted = true)
     }
 
     override fun canMeetDeadline(deadline: Long, queuedAhead: Int): Boolean {
+        return expectedFinishAt(queuedAhead) <= deadline
+    }
+
+    private fun expectedFinishAt(queuedAhead: Int, now: Long = now()): Long {
         val avgMillis = requestAverageProcessingTime.toMillis()
         val rateWait = (waiting.get() + queuedAhead).toLong() * rateWindow.toMillis() / rateLimitPerSec
         val slotWait = (pending.get() + queuedAhead).toLong() / parallelRequests * avgMillis
-        val expectedFinish = now() + maxOf(rateWait, slotWait) + avgMillis
-        return expectedFinish <= deadline
+        return now() + maxOf(rateWait, slotWait) + avgMillis
     }
 
     private fun awaitRatePermit(deadline: Long): Boolean {
