@@ -1,0 +1,431 @@
+{
+  "uid": "highload-case7",
+  "title": "Case 7: HTTP timeouts and retries",
+  "schemaVersion": 40,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "tags": [
+    "highload",
+    "case-7"
+  ],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(payment_retries_total, job)",
+        "definition": "label_values(payment_retries_total, job)",
+        "refresh": 1,
+        "includeAll": false,
+        "allValue": null,
+        "multi": false,
+        "current": {
+          "text": "online-store-job",
+          "value": "online-store-job"
+        },
+        "options": []
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(payment_retries_total{job=~\"$job\"}, instance)",
+        "definition": "label_values(payment_retries_total{job=~\"$job\"}, instance)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "$__all",
+          "value": "$__all"
+        },
+        "options": []
+      },
+      {
+        "name": "account",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(payment_retries_total{job=~\"$job\"}, account)",
+        "definition": "label_values(payment_retries_total{job=~\"$job\"}, account)",
+        "refresh": 1,
+        "includeAll": false,
+        "allValue": null,
+        "multi": false,
+        "current": {
+          "text": "acc-7",
+          "value": "acc-7"
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Повторные вызовы и таймауты / с",
+      "description": "Считаются реально начатые повторы и HTTP-попытки, завершившиеся таймаутом.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account) (rate(payment_retries_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} retries",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (account) (rate(payment_timeouts_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} timeouts",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Повторы и таймауты за выбранный период",
+      "description": "increase использует интерполяцию Prometheus; границы периода задайте по времени конкретного прогона.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account) (increase(payment_retries_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[$__range]))",
+          "legendFormat": "{{account}} retries",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (account) (increase(payment_timeouts_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[$__range]))",
+          "legendFormat": "{{account}} timeouts",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Длительность HTTP: p50, p85, p95, p99 и таймаут",
+      "description": "Персентили гистограммы всех исходов. После включения отсечения распределение ограничено таймаутом: это не исходный полный хвост провайдера. Для подбора сравните с базовым прогоном.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, account) (rate(payment_http_duration_seconds_bucket{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])))",
+          "legendFormat": "{{account}} p50",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.85, sum by (le, account) (rate(payment_http_duration_seconds_bucket{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])))",
+          "legendFormat": "{{account}} p85",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.95, sum by (le, account) (rate(payment_http_duration_seconds_bucket{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])))",
+          "legendFormat": "{{account}} p95",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "D",
+          "expr": "histogram_quantile(0.99, sum by (le, account) (rate(payment_http_duration_seconds_bucket{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])))",
+          "legendFormat": "{{account}} p99",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "E",
+          "expr": "payment_http_timeout_seconds{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{account}} timeout",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Среднее время одной HTTP-попытки",
+      "description": "Включает чтение тела ответа; не включает ожидание семафора, RPS и задержку между повторами.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account, outcome) (rate(payment_http_duration_seconds_sum{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])) / sum by (account, outcome) (rate(payment_http_duration_seconds_count{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} {{outcome}}",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Все исходящие HTTP и успешные оплаты / с",
+      "description": "Повторные HTTP-вызовы входят в исходящий RPS; completed считается один раз для результата оплаты аккаунта.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account) (rate(payment_outgoing_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} HTTP attempts",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (account, result) (rate(payment_completed_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} payment {{result}}",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Очереди и незавершённые оплаты",
+      "description": "pending — логические оплаты внутри HTTP executor, включая ожидания и повторы; waiting — ожидающие rate limiter.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "payment_pending{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{account}} pending",
+          "range": true,
+          "datasource": "Prometheus"
+        },
+        {
+          "refId": "B",
+          "expr": "payment_waiting{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}",
+          "legendFormat": "{{account}} waiting RPS",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Доля повторов среди исходящих HTTP",
+      "description": "Проверяйте цену восстановления: сокращение задержки не должно порождать чрезмерные повторы.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account) (rate(payment_retries_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])) / clamp_min(sum by (account) (rate(payment_outgoing_total{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m])), 0.000001)",
+          "legendFormat": "{{account}} retries / attempts",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Исходы отдельных HTTP-попыток / с",
+      "description": "success, failure, timeout, io_error. Результат попытки отличается от итогового результата оплаты.",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (account, outcome) (rate(payment_http_duration_seconds_count{account=~\"$account\",job=~\"$job\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "{{account}} {{outcome}}",
+          "range": true,
+          "datasource": "Prometheus"
+        }
+      ]
+    }
+  ]
+}
