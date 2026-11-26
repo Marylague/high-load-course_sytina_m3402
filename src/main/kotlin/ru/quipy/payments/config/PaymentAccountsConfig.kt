@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.*
+import java.time.Duration
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -35,6 +36,9 @@ class PaymentAccountsConfig {
 
     @Value("#{'\${payment.accounts}'.split(',')}")
     lateinit var allowedAccounts: List<String>
+
+    @Value("\${payment.attempt-timeout-millis:1000}")
+    var attemptTimeoutMillis: Long = 1000
 
     @Bean
     fun accountAdapters(
@@ -63,6 +67,7 @@ class PaymentAccountsConfig {
                     paymentProviderHostPort,
                     token,
                     meterRegistry,
+                    Duration.ofMillis(attemptTimeoutMillis),
                 )
             }
     }
